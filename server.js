@@ -11,10 +11,6 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
-const tlc = require('tiktok-live-connector');
-
-const Connection = tlc.TikTokLiveConnection || tlc.WebcastPushConnection; // v2 / v1
-const EV = tlc.WebcastEvent || { CHAT: 'chat', GIFT: 'gift' };
 
 // ================= SETTINGS: change these =================
 const USERNAME = (process.env.TIKTOK_USERNAME || process.argv[2] || '').replace('@', '');
@@ -24,6 +20,10 @@ const TEAMS = {
   b: ['white']    // words viewers type to join team B (WHITE in game.html)
 };
 // ==========================================================
+
+// Keep the page online even if something unexpected goes wrong; just print it.
+process.on('uncaughtException', err => console.error('UNCAUGHT ERROR:', err && err.stack || err));
+process.on('unhandledRejection', err => console.error('UNHANDLED REJECTION:', err && err.stack || err));
 
 // --- web server: shows the game at the main address ---
 const server = http.createServer((req, res) => {
@@ -41,7 +41,7 @@ const server = http.createServer((req, res) => {
 
 // --- websocket: sends points to the game page ---
 const wss = new WebSocketServer({ server });
-server.listen(PORT, () => console.log('Game running on port ' + PORT));
+server.listen(PORT, '0.0.0.0', () => console.log('Game running on port ' + PORT));
 
 function broadcast(msg) {
   const s = JSON.stringify(msg);
@@ -59,9 +59,28 @@ function teamFromText(text) {
 }
 
 // --- TikTok side ---
-if (!USERNAME) {
-  console.log('No TikTok username set. Set TIKTOK_USERNAME (or run: node server.js yourname). Game page still works in test mode.');
-} else {
+async function initTikTok() {
+  if (!USERNAME) {
+    console.log('No TikTok username set. Set TIKTOK_USERNAME. Game page still works in test mode.');
+    return;
+  }
+
+  let lib;
+  try {
+    const mod = await import('tiktok-live-connector'); // works for both old and new library styles
+    lib = Object.assign({}, mod.default && typeof mod.default === 'object' ? mod.default : {}, mod);
+  } catch (err) {
+    console.error('Could not load tiktok-live-connector:', err && err.stack || err);
+    return;
+  }
+
+  const Connection = lib.TikTokLiveConnection || lib.WebcastPushConnection;
+  const EV = lib.WebcastEvent || { CHAT: 'chat', GIFT: 'gift' };
+  if (!Connection) {
+    console.error('tiktok-live-connector loaded but no connection class found. Exports:', Object.keys(lib));
+    return;
+  }
+
   const conn = new Connection(USERNAME);
 
   conn.on(EV.CHAT, d => {
@@ -91,9 +110,11 @@ if (!USERNAME) {
     conn.connect()
       .then(() => console.log('Connected to @' + USERNAME + "'s LIVE"))
       .catch(err => {
-        console.error('Could not connect (are you LIVE?). Retrying in 20s:', err.message || err);
+        console.error('Could not connect (are you LIVE?). Retrying in 20s:', err && err.message || err);
         setTimeout(start, 20000);
       });
   };
   start();
 }
+
+initTikTok();
