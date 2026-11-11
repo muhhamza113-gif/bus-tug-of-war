@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bus Tug of War</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,Arial,sans-serif;color:#fff}
+  #wrap{display:flex;flex-direction:column;height:100vh}
+  canvas{display:block;width:100%;flex:1;min-height:0}
+  #controls{display:flex;gap:6px;padding:8px;background:#111}
+  button{flex:1;padding:14px 4px;font-size:15px;border:0;border-radius:10px;color:#fff;font-weight:700}
+  .a{background:#2f5bd8}
+  .b{background:#7d7d7d}
+  #status{position:fixed;left:8px;bottom:70px;font-size:12px;opacity:.7;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="controls">
+    <button class="a" id="a1">+1 BLUE</button>
+    <button class="a" id="a10">+10 BLUE</button>
+    <button class="b" id="b1">+1 WHITE</button>
+    <button class="b" id="b10">+10 WHITE</button>
+  </div>
+</div>
+<div id="status">test mode (no TikTok bridge)</div>
+
+<script>
+// ================= SETTINGS: change these =================
+const CONFIG = {
+  teams: {
+    a: { name: 'BLUE',  color: '#2f5bd8', accent: '#c0392b' },
+    b: { name: 'WHITE', color: '#f1f1f1', accent: '#d4af37' }
+  },
+  goalKm: 10,          // length of the bar
+  kmPerPoint: 0.005,   // how far 1 point pushes the bar (lead of 1000 points = win)
+  restartMs: 7000,     // pause on win screen before restarting
+  // when hosted online this uses the same address as the page; opened as a plain file it tries your own computer
+  wsUrl: (location.protocol === 'https:' || location.protocol === 'http:')
+    ? (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host
+    : 'ws://localhost:8080'
+};
+// ==========================================================
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, u = 1;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const r = canvas.getBoundingClientRect();
+  canvas.width = Math.max(2, Math.floor(r.width * dpr));
+  canvas.height = Math.max(2, Math.floor(r.height * dpr));
+  W = canvas.width; H = canvas.height;
+  u = Math.min(W / 720, H / 520);
+}
+window.addEventListener('resize', resize);
+
+// ---------- game state ----------
+const S = {
+  a: { points: 0 },
+  b: { points: 0 },
+  d: CONFIG.goalKm / 2,   // current bar position (km)
+  vel: 0,
+  winner: null,
+  winAt: 0,
+  feed: []
+};
+
+function addPoints(team, pts, who) {
+  if (S.winner || !S[team] || !(pts > 0)) return;
+  S[team].points += pts;
+  S.feed.unshift({ text: (who ? who + ' → ' : '') + CONFIG.teams[team].name + ' +' + pts, t: performance.now(), team });
+  if (S.feed.length > 4) S.feed.pop();
+}
+
+function resetGame() {
+  S.a.points = 0; S.b.points = 0;
+  S.d = CONFIG.goalKm / 2; S.vel = 0; S.winner = null; S.feed = [];
+}
+
+function update() {
+  const target = CONFIG.goalKm / 2 + (S.a.points - S.b.points) * CONFIG.kmPerPoint;
+  const clamped = Math.max(0, Math.min(CONFIG.goalKm, target));
+  const prev = S.d;
+  S.d += (clamped - S.d) * 0.05;
+  S.vel = S.d - prev;
+  if (!S.winner) {
+    if (S.d >= CONFIG.goalKm - 0.02) { S.winner = 'a'; S.winAt = performance.now(); }
+    else if (S.d <= 0.02) { S.winner = 'b'; S.winAt = performance.now(); }
+  } else if (performance.now() - S.winAt > CONFIG.restartMs) {
+    resetGame();
+  }
+}
+
+// ---------- drawing helpers ----------
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+let camX = 0;
+function ground(wx) {
+  return H * 0.68 + Math.sin(wx / 170) * H * 0.05 + Math.sin(wx / 63) * H * 0.016;
+}
+function place(sx) {
+  const wx = camX + sx - W / 2;
+  return { x: sx, y: ground(wx), a: Math.atan2(ground(wx + 24) - ground(wx - 24), 48) };
+}
+
+let wheelRot = 0;
+function wheel(x, y, r) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(wheelRot);
+  ctx.fillStyle = '#1b1b1b';
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#9a9a9a';
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#1b1b1b';
+  ctx.fillRect(-r * 0.5, -r * 0.08, r, r * 0.16);
+  ctx.restore();
+}
+
+function drawJeep(sx, dir, team) {
+  const p = place(sx), t = CONFIG.teams[team];
+  ctx.save();
+  ctx.translate(p.x, p.y); ctx.rotate(p.a); ctx.scale(dir, 1);
+  wheel(-34 * u, -14 * u, 14 * u);
+  wheel(34 * u, -14 * u, 14 * u);
+  ctx.fillStyle = t.color;
+  rr(-52 * u, -48 * u, 104 * u, 28 * u, 6 * u); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,.25)';
+  ctx.fillRect(-30 * u, -72 * u, 4 * u, 26 * u);
+  ctx.fillRect(10 * u, -72 * u, 4 * u, 26 * u);
+  ctx.fillRect(-30 * u, -74 * u, 44 * u, 4 * u);
+  ctx.fillStyle = '#f2c9a0';
+  ctx.beginPath(); ctx.arc(-8 * u, -62 * u, 8 * u, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.beginPath(); ctx.arc(-8 * u, -66 * u, 8 * u, Math.PI, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ffe27a';
+  ctx.fillRect(48 * u, -42 * u, 6 * u, 8 * u);
+  ctx.restore();
+}
+
+function drawBus(sx, dir, team, flag) {
+  const p = place(sx), t = CONFIG.teams[team];
+  ctx.save();
+  ctx.translate(p.x, p.y); ctx.rotate(p.a); ctx.scale(dir, 1);
+  wheel(-38 * u, -12 * u, 12 * u);
+  wheel(38 * u, -12 * u, 12 * u);
+  ctx.fillStyle = t.color;
+  rr(-60 * u, -56 * u, 120 * u, 44 * u, 7 * u); ctx.fill();
+  ctx.fillStyle = t.accent;
+  ctx.fillRect(-60 * u, -26 * u, 120 * u, 6 * u);
+  ctx.fillStyle = '#bfe3ff';
+  for (let i = 0; i < 5; i++) ctx.fillRect((-52 + i * 20) * u, -50 * u, 15 * u, 14 * u);
+  ctx.fillStyle = '#ffe27a';
+  ctx.fillRect(56 * u, -22 * u, 5 * u, 6 * u);
+  if (flag) {
+    ctx.fillStyle = '#ddd';
+    ctx.fillRect(-4 * u, -92 * u, 2.5 * u, 36 * u);
+    ctx.fillStyle = t.accent;
+    ctx.beginPath();
+    ctx.moveTo(-2 * u, -92 * u); ctx.lineTo(24 * u, -84 * u); ctx.lineTo(-2 * u, -74 * u); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawText(text, x, y, size, color, align) {
+  ctx.font = '800 ' + size + 'px system-ui, Arial, sans-serif';
+  ctx.textAlign = align || 'left';
+  ctx.lineWidth = Math.max(2, size / 7);
+  ctx.strokeStyle = 'rgba(0,0,0,.65)';
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+}
+
+function drawBusIcon(x, y, team) {
+  const t = CONFIG.teams[team];
+  ctx.fillStyle = t.color; rr(x, y, 50 * u, 26 * u, 4 * u); ctx.fill();
+  ctx.fillStyle = t.accent; ctx.fillRect(x, y + 16 * u, 50 * u, 4 * u);
+  ctx.fillStyle = '#bfe3ff';
+  for (let i = 0; i < 3; i++) ctx.fillRect(x + (4 + i * 15) * u, y + 3 * u, 11 * u, 8 * u);
+}
+
+// ---------- main draw ----------
+function draw() {
+  // sky
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#f08a3c'); sky.addColorStop(0.6, '#e06a2a'); sky.addColorStop(1, '#a8431c');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+  camX = S.d * 3200 * u;
+
+  // far hills
+  ctx.fillStyle = 'rgba(120,45,15,.45)';
+  ctx.beginPath(); ctx.moveTo(0, H);
+  for (let x = 0; x <= W; x += 10) {
+    const wx = camX * 0.4 + x;
+    ctx.lineTo(x, H * 0.55 + Math.sin(wx / 260) * H * 0.07 + Math.sin(wx / 90) * H * 0.02);
+  }
+  ctx.lineTo(W, H); ctx.fill();
+
+  // ground
+  const g = ctx.createLinearGradient(0, H * 0.6, 0, H);
+  g.addColorStop(0, '#c8602a'); g.addColorStop(1, '#6e2a10');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.moveTo(0, H);
+  for (let x = 0; x <= W; x += 6) ctx.lineTo(x, ground(camX + x - W / 2));
+  ctx.lineTo(W, H); ctx.fill();
+  ctx.strokeStyle = '#f3a455'; ctx.lineWidth = 3 * u;
+  ctx.beginPath();
+  for (let x = 0; x <= W; x += 6) { const y = ground(camX + x - W / 2); x ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+  ctx.stroke();
+
+  // gold dots in the ground
+  ctx.fillStyle = 'rgba(255,200,90,.55)';
+  for (let i = 0; i < 40; i++) {
+    const wx = Math.floor((camX - W / 2) / 90) * 90 + i * 90;
+    const sx = wx - camX + W / 2;
+    const y = ground(wx) + 40 * u + ((i * 37) % 5) * 28 * u;
+    if (sx > -10 && sx < W + 10 && y < H) { ctx.beginPath(); ctx.arc(sx, y, 4 * u, 0, Math.PI * 2); ctx.fill(); }
+  }
+
+  wheelRot += S.vel * 40;
+
+  // vehicles: blue on the left facing right, white on the right facing left
+  const cx = W / 2;
+  const jeepA = cx - 62 * u, jeepB = cx + 62 * u;
+  const showA = Math.min(14, S.a.points), showB = Math.min(14, S.b.points);
+  for (let i = 0; i < showA; i++) {
+    const sx = cx - 180 * u - i * 126 * u;
+    if (sx > -80 * u) drawBus(sx, 1, 'a', i % 2 === 0);
+  }
+  for (let i = 0; i < showB; i++) {
+    const sx = cx + 180 * u + i * 126 * u;
+    if (sx < W + 80 * u) drawBus(sx, -1, 'b', i % 2 === 0);
+  }
+  drawJeep(jeepA, 1, 'a');
+  drawJeep(jeepB, -1, 'b');
+
+  // progress bar
+  const bw = W * 0.72, bh = 24 * u, bx = (W - bw) / 2, by = 18 * u;
+  ctx.fillStyle = 'rgba(0,0,0,.55)'; rr(bx - 4 * u, by - 4 * u, bw + 8 * u, bh + 8 * u, 14 * u); ctx.fill();
+  const frac = S.d / CONFIG.goalKm;
+  ctx.fillStyle = CONFIG.teams.a.color; rr(bx, by, bw, bh, 10 * u); ctx.fill();
+  ctx.save(); rr(bx, by, bw, bh, 10 * u); ctx.clip();
+  ctx.fillStyle = CONFIG.teams.b.color; ctx.fillRect(bx + bw * frac, by, bw, bh);
+  ctx.fillStyle = '#ffd34d'; ctx.fillRect(bx + bw * frac - 2 * u, by, 4 * u, bh);
+  ctx.restore();
+  drawText(S.d.toFixed(1) + ' km / ' + CONFIG.goalKm + ' km', W / 2, by + bh + 22 * u, 16 * u, '#fff', 'center');
+
+  // counters
+  drawBusIcon(bx, by + bh + 34 * u, 'a');
+  drawText('x' + S.a.points, bx + 58 * u, by + bh + 55 * u, 24 * u, '#fff', 'left');
+  drawBusIcon(bx + bw - 50 * u, by + bh + 34 * u, 'b');
+  drawText('x' + S.b.points, bx + bw - 58 * u, by + bh + 55 * u, 24 * u, '#fff', 'right');
+
+  // feed
+  const now = performance.now();
+  S.feed = S.feed.filter(f => now - f.t < 6000);
+  S.feed.forEach((f, i) => {
+    ctx.globalAlpha = Math.max(0, 1 - (now - f.t) / 6000);
+    drawText(f.text, W - 12 * u, by + bh + 90 * u + i * 22 * u, 15 * u, f.team === 'a' ? '#9db8ff' : '#fff', 'right');
+  });
+  ctx.globalAlpha = 1;
+
+  // win screen
+  if (S.winner) {
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(0, 0, W, H);
+    drawText(CONFIG.teams[S.winner].name + ' WINS!', W / 2, H / 2, 54 * u, '#ffd34d', 'center');
+    const left = Math.ceil((CONFIG.restartMs - (now - S.winAt)) / 1000);
+    drawText('New race in ' + Math.max(0, left) + 's', W / 2, H / 2 + 40 * u, 20 * u, '#fff', 'center');
+  }
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+
+// ---------- test controls ----------
+document.getElementById('a1').onclick  = () => addPoints('a', 1, 'test');
+document.getElementById('a10').onclick = () => addPoints('a', 10, 'test');
+document.getElementById('b1').onclick  = () => addPoints('b', 1, 'test');
+document.getElementById('b10').onclick = () => addPoints('b', 10, 'test');
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'a') addPoints('a', e.shiftKey ? 10 : 1, 'test');
+  if (k === 'l') addPoints('b', e.shiftKey ? 10 : 1, 'test');
+  if (k === 'r') resetGame();
+});
+
+// ---------- TikTok bridge (server.js) ----------
+const statusEl = document.getElementById('status');
+function connect() {
+  let ws;
+  try { ws = new WebSocket(CONFIG.wsUrl); } catch (e) { return setTimeout(connect, 4000); }
+  ws.onopen = () => { statusEl.textContent = 'connected to TikTok bridge'; };
+  ws.onmessage = ev => {
+    try {
+      const m = JSON.parse(ev.data);
+      if (m.type === 'points') addPoints(m.team, m.points, m.name);
+    } catch (e) {}
+  };
+  ws.onclose = () => { statusEl.textContent = 'test mode (no TikTok bridge)'; setTimeout(connect, 4000); };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+}
+
+resize();
+connect();
+loop();
+</script>
+</body>
+</html>
